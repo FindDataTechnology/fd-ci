@@ -1,0 +1,189 @@
+# 共享镜像构建 —— 31 个仓的 image.yml 收成这一份
+#
+# 调用方（每个服务仓自己的 .github/workflows/image.yml）：
+#
+#   name: image
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#   jobs:
+#     build-push:
+#       uses: FindDataTechnology/fd-ci/.github/workflows/image-build.yml@main
+#       secrets: inherit
+#       with:
+#         image: fd-text-core
+#         namespace: finddata
+#
+# 多镜像的仓写多个 job，各带自己的 with。
+#
+# ## 为什么必须用一个公开仓
+#
+# 跨仓 `workflow_call` 要求被调用的 workflow 所在仓对调用方可见。放私有仓会让
+# 所有调用方失败。本仓零拓扑、零凭据。
+#
+# ## 保留了什么语义（逐条对照 31 份原实现）
+#
+#   · provenance: false —— **硬约束**。开了 attestation，同内容两次构建 digest
+#     必然不同，内容闸门会永久判「变了」而失效。
+#   · platforms: linux/amd64 —— 现状全是单平台（37 处一致）。
+#   · 内容闸门 —— digest 与 main 当前相同则不铸新 tag，让「同内容多 tag」
+#     结构上不可能（openspec: gate-image-tags-on-content-change）。
+#   · 不可变 sha-<7> tag —— 禁 latest / 浮动标签。
+#   · cache-from/to: gha —— 保持构建速度。
+#   · concurrency 按 ref 分组 —— 同一分支的连续推送不排队。
+#
+# ## 为什么不把 runner 做成输入
+#
+# 51 处 `runs-on` 全是 ubuntu-latest。为不存在的变化预留开关只是噪音。
+name: image-build
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: 镜像名（如 fd-lex-web）
+        required: true
+        type: string
+      namespace:
+        description: TCR 命名空间（如 finddata / finddata-business）
+        required: true
+        type: string
+      dockerfile:
+        description: Dockerfile 路径
+        required: false
+        type: string
+        default: Dockerfile
+      context:
+        description: 构建上下文
+        required: false
+        type: string
+        default: .
+      registry:
+        description: 目标 registry
+        required: false
+        type: string
+        default: hkccr.ccs.tencentyun.com
+    secrets:
+      TCR_USERNAME:
+        required: false
+      TCR_PASSWORD:
+        required: false
+      # 部分仓用的是组织级 TCR_USER / TCR_PASS（名字不同）。两个都声明，
+      # workflow 里取第一个非空的 —— 见下方「凭据名兼容」。
+      TCR_USER:
+        required: false
+      TCR_PASS:
+        required: false
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # 凭据名兼容：仓级通常配 TCR_USERNAME/TCR_PASSWORD，组织级是 TCR_USER/TCR_PASS。
+      # 名字不匹配时 GitHub 静默给空串，报错长得像「密钥缺失」—— 2026-11-20 实撞过
+      # （fd-data-quality 没有任何仓级密钥，login 报 "Username and password required"）。
+      - name: 解析凭据
+        id: cred
+        env:
+          U1: ${{ secrets.TCR_USERNAME }}
+          U2: ${{ secrets.TCR_USER }}
+          P1: ${{ secrets.TCR_PASSWORD }}
+          P2: ${{ secrets.TCR_PASS }}
+        run: |
+          set -euo pipefail
+          user="${U1:-$U2}"; pass="${P1:-$P2}"
+          if [ -z "$user" ] || [ -z "$pass" ]; then
+            cat >&2 <<'EOF'
+          ::error::TCR 凭据缺失。
+          本仓既没有 TCR_USERNAME/TCR_PASSWORD（仓级），也没有 TCR_USER/TCR_PASS（组织级）。
+          修法：gh secret set TCR_USERNAME --repo <org>/<repo>（同理 TCR_PASSWORD），
+          值可从任一能跑的仓所在机器 /root/.docker/config.json 取。
+          EOF
+            exit 1
+          fi
+          echo "user=$user" >> "$GITHUB_OUTPUT"
+          echo "pass=$pass" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ steps.cred.outputs.user }}
+          password: ${{ steps.cred.outputs.pass }}
+
+      - id: prev
+        name: 读 main 当前 digest（内容基线）
+        env:
+          IMG: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+        run: |
+          cur=$(docker buildx imagetools inspect "$IMG:main" \
+                --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+          echo "digest=$cur" >> "$GITHUB_OUTPUT"
+          echo "${{ inputs.image }} main 当前 digest: ${cur:-<不存在，本次为首次构建>}"
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+          tags: |
+            type=raw,value=main
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          # 硬约束：开了 attestation，同内容两次构建 digest 必然不同，闸门永久失效。
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 内容闸门：digest 变了才铸 sha-<commit>，让「同内容多 tag」结构上不可能。
+      - name: 内容变了才铸不可变 tag
+        env:
+          NEW: ${{ steps.build.outputs.digest }}
+          OLD: ${{ steps.prev.outputs.digest }}
+          IMG: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          [ -n "$NEW" ] || { echo "::error::构建未产出 digest"; exit 1; }
+          if [ "$NEW" = "$OLD" ]; then
+            echo "内容未变（$NEW）：不铸新 tag"
+            {
+              echo "### 内容未变，未产出新 tag"
+              echo ""
+              echo "本次构建与 \`main\` 当前指向完全一致。"
+              echo ""
+              echo "- 可直接 pin：\`$IMG@$NEW\`"
+              echo "- 滚动引用：\`$IMG:main\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          tag="sha-${GITHUB_SHA::7}"
+          docker buildx imagetools create -t "$IMG:$tag" "$IMG@$NEW"
+          echo "已铸 $tag → $NEW"
+          {
+            echo "### 内容有变化，已铸不可变 tag"
+            echo ""
+            echo "| 字段 | 值 |"
+            echo "|---|---|"
+            echo "| image | \`$IMAGE\` |"
+            echo "| tag | \`$tag\` |"
+            echo "| digest | \`$NEW\` |"
+            echo "| 上一内容 digest | \`${OLD:-<无>}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
