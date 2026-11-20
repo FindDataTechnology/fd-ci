@@ -76,10 +76,12 @@ on:
       TCR_PASS:
         required: false
 
-concurrency:
-  group: image-${{ github.ref }}
-  cancel-in-progress: true
-
+# 不在共享 workflow 里设 concurrency。
+#
+# 2026-11-21 实测：写在共享层时，一个仓的两个 job（fd-lex 的 web + api）会共享
+# 同一个 `github.ref` 分组，后启动的取消先启动的 —— web 被 cancelled 而 api 成功。
+# concurrency 属于「调用方的编排」，不属于「单次构建」，所以留在各仓自己的
+# workflow 里（若需要），不在这里。
 permissions:
   contents: read
 
