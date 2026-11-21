@@ -182,26 +182,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - id: smoke-encode
-        if: inputs.smoke_script != ''
-        env:
-          RAW: ${{ inputs.smoke_script }}
-        run: |
-          echo "smoke_script_b64=$(printf '%s' "$RAW" | base64 -w0)" >> "$GITHUB_OUTPUT"
-
       - id: smoke
         if: inputs.smoke_script != ''
         name: Smoke gate（构建后、推 tag 前）
         env:
+          # 脚本走 env 而不是直接插入 run 里 —— env 的值不经 shell 解析，
+          # 含引号/反引号/$ 的脚本也不会被打断。2026-11-21 实撞过两次。
+          RAW: ${{ inputs.smoke_script }}
           IMG: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}:main
         run: |
           set -euo pipefail
-          # 用 base64 传脚本：直接 `echo "${{ inputs.smoke_script }}"` 在脚本含
-          # 双引号时会被 shell 再解析一次（2026-11-21 实撞：`import scrapy` 那行的
-          # 引号把 bash 打成了 syntax error）。base64 之后只剩字母数字与 +/=
-          printf '%s' "${{ steps.smoke-encode.outputs.smoke_script_b64 }}" | base64 -d > "$RUNNER_TEMP/smoke.sh"
+          printf '%s' "$RAW" > "$RUNNER_TEMP/smoke.sh"
           echo "--- smoke script ---"; cat "$RUNNER_TEMP/smoke.sh"; echo "--------------------"
           bash "$RUNNER_TEMP/smoke.sh"
+
 
       - id: build-push
         if: inputs.smoke_script != ''
