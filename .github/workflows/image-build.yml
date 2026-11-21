@@ -64,6 +64,16 @@ on:
         required: false
         type: string
         default: hkccr.ccs.tencentyun.com
+      smoke_script:
+        description: |
+          构建后、推 tag 前的验活脚本（shell）。**非空时构建流程会变成两段**：
+          先 `load: true` 构建到本地 → 跑这段脚本 → 再复用 cache 推送。
+          空（默认）则一步 build+push。
+          用途：`scraw-fd-open-data-mcp` 的 import/entrypoint 验活、`paas` 的 9 个 smoke。
+          脚本里可用环境变量 $IMG（= registry/namespace/image:main）。
+        required: false
+        type: string
+        default: ""
     secrets:
       TCR_USERNAME:
         required: false
@@ -141,7 +151,9 @@ jobs:
           tags: |
             type=raw,value=main
 
+      # 没有 smoke 脚本：一步 build+push（绝大多数仓）
       - id: build
+        if: inputs.smoke_script == ''
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -154,10 +166,49 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # 有 smoke 脚本：先构建到本地不推 → 验活 → 再复用 cache 推
+      # （2026-11-21 加：scraw-fd-open-data-mcp 的 Smoke gate 必须在 push 之前跑，
+      #  它是 2026-10-01 w3lib 2.5 回归漏进机队的守卫）
+      - id: build-local
+        if: inputs.smoke_script != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - id: smoke
+        if: inputs.smoke_script != ''
+        name: Smoke gate（构建后、推 tag 前）
+        env:
+          IMG: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}:main
+        run: |
+          set -euo pipefail
+          echo "${{ inputs.smoke_script }}" > "$RUNNER_TEMP/smoke.sh"
+          bash "$RUNNER_TEMP/smoke.sh"
+
+      - id: build-push
+        if: inputs.smoke_script != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       # 内容闸门：digest 变了才铸 sha-<commit>，让「同内容多 tag」结构上不可能。
       - name: 内容变了才铸不可变 tag
         env:
-          NEW: ${{ steps.build.outputs.digest }}
+          NEW: ${{ steps.build.outputs.digest }}${{ steps.build-push.outputs.digest }}
           OLD: ${{ steps.prev.outputs.digest }}
           IMG: ${{ inputs.registry }}/${{ inputs.namespace }}/${{ inputs.image }}
           IMAGE: ${{ inputs.image }}
