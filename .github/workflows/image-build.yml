@@ -74,6 +74,16 @@ on:
         required: false
         type: string
         default: ""
+      no_cache:
+        description: |
+          强制禁用 GHA layer cache（默认 false）。用途：`COPY <源码目录>` 层
+          可能长期 cache 命中、镜像里留着旧源码而源码早已更新——2026-11-25 实测
+          fd-industry-runner 的 `COPY fd_industry_data/` 层从 11-08 起一直 CACHED，
+          镜像内 notify.py 停在 3956 字节旧版（缺 dispatch_any），而源码已 17844 字节。
+          排查到这类「cache 卡死源码」时传 true 重建一次。
+        required: false
+        type: boolean
+        default: false
     secrets:
       TCR_USERNAME:
         required: false
@@ -163,6 +173,7 @@ jobs:
           # 硬约束：开了 attestation，同内容两次构建 digest 必然不同，闸门永久失效。
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
+          no-cache: ${{ inputs.no_cache }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -179,6 +190,7 @@ jobs:
           load: true
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
+          no-cache: ${{ inputs.no_cache }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -207,6 +219,7 @@ jobs:
           push: true
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
+          no-cache: ${{ inputs.no_cache }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
