@@ -74,6 +74,16 @@ on:
         required: false
         type: string
         default: ""
+      build_secrets:
+        description: |
+          额外的 BuildKit secret 声明，逗号分隔的 `id=<secret-id>`（默认从
+          `secrets.<secret-id>` 取，也可写 `id=<file-in-context>`）。
+          用途：构建期要访问有额度限制的 API（如 fd-official-web 的 GitHub
+          README 抓取）——匿名调用共用按 IP 的 60 次/小时，一超就整份构建中止。
+          每行转成 `--secret id=...` 交给 docker/build-push-action。
+        required: false
+        type: string
+        default: ""
       no_cache:
         description: |
           强制禁用 GHA layer cache（默认 false）。用途：`COPY <源码目录>` 层
@@ -170,6 +180,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
+          secret-files: ${{ inputs.build_secrets }}
           # 硬约束：开了 attestation，同内容两次构建 digest 必然不同，闸门永久失效。
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
@@ -188,6 +199,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           load: true
+          secret-files: ${{ inputs.build_secrets }}
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           no-cache: ${{ inputs.no_cache }}
@@ -217,6 +229,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
+          secret-files: ${{ inputs.build_secrets }}
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           no-cache: ${{ inputs.no_cache }}
